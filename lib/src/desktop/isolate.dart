@@ -208,8 +208,8 @@ Future<TaskStatus> transferBytes(
 ///
 /// Sends status update via the [sendPort], if requested
 /// If the task is finished, processes a final progressUpdate update
-void processStatusUpdateInIsolate(
-    Task task, TaskStatus status, SendPort sendPort) {
+Future<void> processStatusUpdateInIsolate(
+    Task task, TaskStatus status, SendPort sendPort) async {
   final retryNeeded = status == TaskStatus.failed && task.retriesRemaining > 0;
   // if task is in final state, process a final progressUpdate
   // A 'failed' progress update is only provided if
@@ -234,6 +234,7 @@ void processStatusUpdateInIsolate(
     default:
       {}
   }
+
   final statusUpdate = TaskStatusUpdate(
     task,
     status,
@@ -246,6 +247,11 @@ void processStatusUpdateInIsolate(
     status.isFinalState ? mimeType : null,
     status.isFinalState ? charSet : null,
   );
+
+  if (task.options?.onTaskFinishedCallBack != null) {
+    await task.options?.onTaskFinishedCallBack!(statusUpdate);
+  }
+
   // Post update if task expects one, or if failed and retry is needed
   if (task.providesStatusUpdates || retryNeeded) {
     sendPort.send((
@@ -260,7 +266,6 @@ void processStatusUpdateInIsolate(
       statusUpdate.charSet,
     ));
   }
-  task.options?.onTaskFinishedCallBack?.call(statusUpdate);
 }
 
 /// Processes a progress update for the [task]
