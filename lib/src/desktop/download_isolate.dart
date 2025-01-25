@@ -36,7 +36,7 @@ Future<void> doDownloadTask(
   // Otherwise, it is a generated full path to the temp directory
   final tempFilePath = isResume && resumeData != null
       ? resumeData.tempFilepath
-      : p.join((await getTemporaryDirectory()).path,
+      : p.join(task.directory,
           'com.bbflight.background_downloader${Random().nextInt(1 << 32).toString()}');
   final requiredStartByte =
       resumeData?.requiredStartByte ?? 0; // start for resume
