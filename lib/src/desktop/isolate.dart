@@ -442,4 +442,4 @@ bool shouldSendProgressUpdate(double currentProgress, DateTime now) =>
     (currentProgress - lastProgressUpdate > 0.02 &&
         now.isAfter(nextProgressUpdateTime)) ||
     (currentProgress > lastProgressUpdate &&
-        now.isAfter(nextProgressUpdateTime.add(const Duration(seconds: 2))));
+        now.isAfter(nextProgressUpdateTime.add(const Duration(milliseconds: 500))));
