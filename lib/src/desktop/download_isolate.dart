@@ -36,8 +36,8 @@ Future<void> doDownloadTask(
   // Otherwise, it is a generated full path to the temp directory
   final tempFilePath = isResume && resumeData != null
       ? resumeData.tempFilepath
-      : p.join(task.directory,
-          'com.bbflight.background_downloader${Random().nextInt(1 << 32).toString()}');
+      : p.join(downloadTask.directory, downloadTask.filename + '.download');
+  print('Downloading to $tempFilePath');
   final requiredStartByte =
       resumeData?.requiredStartByte ?? 0; // start for resume
   final eTag = resumeData?.eTag;
@@ -121,7 +121,8 @@ Future<void> doDownloadTask(
     // cancellation overrides other results
     resultStatus = TaskStatus.canceled;
   }
-  processStatusUpdateInIsolate(downloadTask, resultStatus, sendPort);
+
+  await processStatusUpdateInIsolate(downloadTask, resultStatus, sendPort);
 }
 
 /// Return true if resume is possible
@@ -178,6 +179,7 @@ Future<TaskStatus> processOkDownloadResponse(
     switch (transferBytesResult) {
       case TaskStatus.complete:
         // copy file to destination, creating dirs if needed
+        print('Copying $tempFilePath to $filePath');
         await outStream.flush();
         final dirPath = p.dirname(filePath);
         Directory(dirPath).createSync(recursive: true);
