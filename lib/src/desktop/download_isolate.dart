@@ -37,7 +37,6 @@ Future<void> doDownloadTask(
   final tempFilePath = isResume && resumeData != null
       ? resumeData.tempFilepath
       : p.join(downloadTask.directory, downloadTask.filename + '.download');
-  print('Downloading to $tempFilePath');
   final requiredStartByte =
       resumeData?.requiredStartByte ?? 0; // start for resume
   final eTag = resumeData?.eTag;
@@ -179,7 +178,6 @@ Future<TaskStatus> processOkDownloadResponse(
     switch (transferBytesResult) {
       case TaskStatus.complete:
         // copy file to destination, creating dirs if needed
-        print('Copying $tempFilePath to $filePath');
         await outStream.flush();
         final dirPath = p.dirname(filePath);
         Directory(dirPath).createSync(recursive: true);
