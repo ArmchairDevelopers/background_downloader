@@ -20,6 +20,10 @@ final class Localstore implements LocalstoreImpl {
 
   Future<Directory> get databaseDirectory => _databaseDirectory;
 
+  set databaseDirectory(Future<Directory> value) {
+    _databaseDirectory = value;
+  }
+
   /// Clears the cache - needed only if filesystem has been manipulated directly
   void clearCache() {
     Utils.instance.clearCache();
