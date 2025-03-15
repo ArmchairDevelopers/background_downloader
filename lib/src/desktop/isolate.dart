@@ -259,7 +259,7 @@ Future<void> processStatusUpdateInIsolate(
   );
 
 
-  if (task.options?.onTaskFinishedCallBack != null) {
+  if (task.options?.onTaskFinishedCallBack != null && status.isFinalState) {
     await task.options?.onTaskFinishedCallBack!(statusUpdate);
   }
 
