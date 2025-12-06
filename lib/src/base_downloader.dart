@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:collection/collection.dart';
@@ -102,6 +103,9 @@ abstract base class BaseDownloader {
 
   /// Connected TaskQueues that will receive a signal upon task completion
   final taskQueues = <TaskQueue>[];
+
+  /// Receive port for isolate communication
+  final receivePort = ReceivePort();
 
   /// Permissions service object
   final permissionsService = PermissionsService.instance();

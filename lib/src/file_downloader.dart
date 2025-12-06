@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -219,6 +220,9 @@ interface class FileDownloader {
   /// See [enqueue] for details
   Future<List<bool>> enqueueAll(Iterable<Task> tasks) =>
       _downloader.enqueueAll(tasks);
+
+  /// Used to receive messages from the downloader isolate
+  ReceivePort get receivePort => _downloader.receivePort;
 
   /// Download a file and return the final [TaskStatusUpdate]
   ///

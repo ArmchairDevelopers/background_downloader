@@ -62,7 +62,8 @@ Future<void> doTask((RootIsolateToken, SendPort) isolateArguments) async {
     bool isResume,
     Duration? requestTimeout,
     Map<String, dynamic> proxy,
-    bool bypassTLSCertificateValidation
+    bool bypassTLSCertificateValidation,
+    SendPort customSendPort,
   ) = await messagesToIsolate.next;
   DesktopDownloader.setHttpClient(
       requestTimeout, proxy, bypassTLSCertificateValidation);
@@ -83,14 +84,14 @@ Future<void> doTask((RootIsolateToken, SendPort) isolateArguments) async {
     responseBody = statusUpdate.responseBody;
     responseHeaders = statusUpdate.responseHeaders;
     responseStatusCode = statusUpdate.responseStatusCode;
-    processStatusUpdateInIsolate(originalTask, statusUpdate.status, sendPort);
+    processStatusUpdateInIsolate(originalTask, statusUpdate.status, sendPort, customSendPort);
     return;
   }
   final task =
       await getModifiedTask(originalTask); // processes onStart and onAuth
   // start listener/processor for incoming messages
   unawaited(listenToIncomingMessages(task, messagesToIsolate, sendPort));
-  processStatusUpdateInIsolate(task, TaskStatus.running, sendPort);
+  processStatusUpdateInIsolate(task, TaskStatus.running, sendPort, customSendPort);
   if (!isResume) {
     processProgressUpdateInIsolate(task, 0.0, sendPort);
   }
@@ -98,7 +99,7 @@ Future<void> doTask((RootIsolateToken, SendPort) isolateArguments) async {
     const message = 'Task has negative retries remaining';
     logError(task, message);
     taskException = TaskException(message);
-    processStatusUpdateInIsolate(task, TaskStatus.failed, sendPort);
+    processStatusUpdateInIsolate(task, TaskStatus.failed, sendPort, customSendPort);
   } else {
     // allow immediate cancel message to come through
     await Future.delayed(const Duration(milliseconds: 0));
@@ -106,7 +107,7 @@ Future<void> doTask((RootIsolateToken, SendPort) isolateArguments) async {
       ParallelDownloadTask() => doParallelDownloadTask(task, resumeData,
           isResume, requestTimeout ?? const Duration(seconds: 60), sendPort),
       DownloadTask() => doDownloadTask(task, resumeData, isResume,
-          requestTimeout ?? const Duration(seconds: 60), sendPort),
+          requestTimeout ?? const Duration(seconds: 60), sendPort, customSendPort),
       UploadTask() => doUploadTask(task, sendPort),
       DataTask() => doDataTask(task, sendPort),
       _ => throw UnimplementedError(),
@@ -219,7 +220,7 @@ Future<TaskStatus> transferBytes(
 /// Sends status update via the [sendPort], if requested
 /// If the task is finished, processes a final progressUpdate update
 Future<void> processStatusUpdateInIsolate(
-    Task task, TaskStatus status, SendPort sendPort) async {
+    Task task, TaskStatus status, SendPort sendPort, [SendPort? customSendPort]) async {
   final retryNeeded = status == TaskStatus.failed && task.retriesRemaining > 0;
   // if task is in final state, process a final progressUpdate
   // A 'failed' progress update is only provided if
@@ -260,7 +261,7 @@ Future<void> processStatusUpdateInIsolate(
 
 
   if (task.options?.onTaskFinishedCallBack != null && status.isFinalState) {
-    await task.options?.onTaskFinishedCallBack!(statusUpdate);
+    await task.options?.onTaskFinishedCallBack!(statusUpdate, customSendPort);
   }
 
   // Post update if task expects one, or if failed and retry is needed

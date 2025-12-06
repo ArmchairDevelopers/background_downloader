@@ -23,7 +23,7 @@ late DownloadTask downloadTask; // global because filename may change
 /// Sends updates via the [sendPort] and can be commanded to cancel/pause via
 /// the [messagesToIsolate] queue
 Future<void> doDownloadTask(DownloadTask task, ResumeData? resumeData,
-    bool isResume, Duration requestTimeout, SendPort sendPort) async {
+    bool isResume, Duration requestTimeout, SendPort sendPort, [SendPort? customSendPort]) async {
   // use downloadTask from here on as a 'global' variable in this isolate,
   // as we may change the filename of the task
   downloadTask = task;
@@ -117,7 +117,7 @@ Future<void> doDownloadTask(DownloadTask task, ResumeData? resumeData,
     resultStatus = TaskStatus.canceled;
   }
 
-  await processStatusUpdateInIsolate(downloadTask, resultStatus, sendPort);
+  await processStatusUpdateInIsolate(downloadTask, resultStatus, sendPort, customSendPort);
 }
 
 /// Return true if resume is possible

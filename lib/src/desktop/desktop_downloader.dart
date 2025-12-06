@@ -159,7 +159,8 @@ final class DesktopDownloader extends BaseDownloader {
       isResume,
       requestTimeout,
       proxy,
-      bypassTLSCertificateValidation
+      bypassTLSCertificateValidation,
+      this.receivePort.sendPort
     ));
     if (_isolateSendPorts.keys.contains(task)) {
       // if already registered with null value, cancel immediately

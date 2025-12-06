@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:ui';
 
 import '../models.dart';
@@ -9,7 +10,7 @@ typedef BeforeTaskStartCallback = Future<TaskStatusUpdate?> Function(Task task);
 typedef OnTaskStartCallback = Future<Task?> Function(Task original);
 
 typedef OnTaskFinishedCallback = Future<void> Function(
-    TaskStatusUpdate taskStatusUpdate);
+    TaskStatusUpdate taskStatusUpdate, [SendPort? sendPort]);
 
 /// Holds various options related to the task that are not included in the
 /// task's properties, as they are rare
