@@ -452,11 +452,11 @@ Future<String?> responseContent(http.StreamedResponse response) {
   }
 }
 
-/// Returns true if [currentProgress] > [lastProgressUpdate] + 2% and
+/// Returns true if [currentProgress] > [lastProgressUpdate] + 1% and
 /// [now] > [nextProgressUpdateTime], or if there was progress and
-/// [now] > [nextProgressUpdateTime] + 2 seconds
+/// [now] > [nextProgressUpdateTime] + 500 ms
 bool shouldSendProgressUpdate(double currentProgress, DateTime now) =>
-    (currentProgress - lastProgressUpdate > 0.02 &&
+    (currentProgress - lastProgressUpdate > 0.01 &&
         now.isAfter(nextProgressUpdateTime)) ||
     (currentProgress > lastProgressUpdate &&
         now.isAfter(nextProgressUpdateTime.add(const Duration(milliseconds: 500))));
