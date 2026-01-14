@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:logging/logging.dart';
 import 'dart:async';
 
 import 'base_downloader.dart';
@@ -11,12 +12,13 @@ import 'task.dart';
 ///
 /// Stores [TaskRecord] objects.
 ///
-/// This object is accessed by the [Downloader] and [BaseDownloader]
+/// This object is accessed by the [FileDownloader] and [BaseDownloader]
 interface class Database {
   static Database? _instance;
   late final PersistentStorage _storage;
   final StreamController<TaskRecord> _controller =
       StreamController<TaskRecord>.broadcast();
+  final _log = Logger('Database');
 
   /// Return the [Database] singleton instance, and creates it if required
   factory Database(PersistentStorage persistentStorage) {
@@ -80,14 +82,8 @@ interface class Database {
   /// Only records that can be found in the database will be included in the
   /// list. TaskIds that cannot be found will be ignored.
   Future<List<TaskRecord>> recordsForIds(Iterable<String> taskIds) async {
-    final result = <TaskRecord>[];
-    for (var taskId in taskIds) {
-      final record = await recordForId(taskId);
-      if (record != null) {
-        result.add(record);
-      }
-    }
-    return result;
+    final records = await Future.wait(taskIds.map((id) => recordForId(id)));
+    return records.whereType<TaskRecord>().toList();
   }
 
   /// Delete all records
@@ -96,11 +92,13 @@ interface class Database {
   Future<void> deleteAllRecords({String? group}) async {
     if (group == null) {
       await _storage.removeTaskRecord(null);
+      _updateCount = 0;
       return;
     }
     final allRecordsInGroup = await allRecords(group: group);
     await deleteRecordsWithIds(
         allRecordsInGroup.map((record) => record.taskId));
+    _updateCount = 0;
   }
 
   /// Delete record with this [taskId]
@@ -109,9 +107,92 @@ interface class Database {
 
   /// Delete records with these [taskIds]
   Future<void> deleteRecordsWithIds(Iterable<String> taskIds) async {
-    for (var taskId in taskIds) {
-      await _storage.removeTaskRecord(taskId);
+    await Future.wait(
+        taskIds.map((taskId) => _storage.removeTaskRecord(taskId)));
+  }
+
+  int _updateCount = 0;
+  bool _autoClean = false;
+  int? _maxRecordCount;
+  Duration? _maxAge;
+  bool _isCleaning = false;
+  bool _waitingToClean = false;
+
+  /// Clean up the database by removing old records and/or keeping the number
+  /// of records below a maximum.
+  ///
+  /// The [maxRecordCount] determines the maximum number of records to keep.
+  /// The [maxAge] determines the maximum age of records to keep.
+  /// If [autoClean] is true, the database will be cleaned automatically
+  /// every 100th update.
+  ///
+  /// If both [maxRecordCount] and [maxAge] are null, the defaults are 500
+  /// records and 10 days.
+  ///
+  /// The function returns immediately, but the actual cleanup happens
+  /// asynchronously and is rate-limited to deleting 5 records per second.
+  void cleanUp({
+    int? maxRecordCount,
+    Duration? maxAge,
+    bool autoClean = true,
+  }) {
+    _autoClean = autoClean;
+    if (maxRecordCount == null && maxAge == null) {
+      _maxRecordCount = 500;
+      _maxAge = const Duration(days: 10);
+    } else {
+      _maxRecordCount = maxRecordCount;
+      _maxAge = maxAge;
     }
+    _cleanDatabase();
+  }
+
+  Future<void> _cleanDatabase() async {
+    if (_isCleaning) {
+      _waitingToClean = true;
+      return;
+    }
+    _isCleaning = true;
+    do {
+      _waitingToClean = false;
+      try {
+        final allRecords = await this.allRecords();
+        allRecords.sort((a, b) =>
+            b.task.creationTime.compareTo(a.task.creationTime)); // Newest first
+
+        final recordsToDelete = <TaskRecord>{};
+        final now = DateTime.now();
+        // Check age
+        if (_maxAge != null) {
+          final maxAge = _maxAge!;
+          recordsToDelete.addAll(allRecords.where(
+              (record) => now.difference(record.task.creationTime) > maxAge));
+        }
+        // Check count
+        if (_maxRecordCount != null) {
+          final count = _maxRecordCount!;
+          if (allRecords.length > count) {
+            // Because we sorted newly created first, the ones after 'count' are the oldest
+            final recordsBeyondCount = allRecords.skip(count);
+            recordsToDelete.addAll(recordsBeyondCount);
+          }
+        }
+        _log.finest(
+            'Database cleanup: ${recordsToDelete.length} out of ${allRecords.length} records to delete');
+        if (recordsToDelete.isNotEmpty) {
+          // Rate limit deletion to ~5 per second
+          for (final record in recordsToDelete) {
+            await deleteRecordWithId(record.taskId);
+            await Future.delayed(const Duration(milliseconds: 200));
+          }
+          _log.finest(
+              'Database cleanup: ${recordsToDelete.length} records deleted}');
+        }
+      } catch (e) {
+        _log.warning('Error during database cleanup: $e');
+      }
+    } while (_waitingToClean);
+    _isCleaning = false;
   }
 
   /// Update or insert the record in the database
@@ -119,6 +200,12 @@ interface class Database {
   /// This is used by the [FileDownloader] to track tasks, and should not
   /// normally be used by the user of this package
   Future<void> updateRecord(TaskRecord record) async {
+    if (_autoClean) {
+      _updateCount++;
+      if (_updateCount % 100 == 0) {
+        _cleanDatabase();
+      }
+    }
     await _storage.storeTaskRecord(record);
     if (_controller.hasListener) {
       _controller.add(record);
@@ -136,7 +223,7 @@ interface class Database {
 /// Record containing task, task status and task progress.
 ///
 /// [TaskRecord] represents the state of the task as recorded in persistent
-/// storage if [trackTasks] has been called to activate this.
+/// storage if [FileDownloader.trackTasks] has been called to activate this.
 final class TaskRecord {
   final Task task;
   final TaskStatus status;

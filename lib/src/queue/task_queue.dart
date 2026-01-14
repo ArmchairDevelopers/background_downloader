@@ -11,6 +11,25 @@ import '../task.dart';
 abstract interface class TaskQueue {
   /// Signals that [task] has finished
   void taskFinished(Task task);
+
+  /// Pauses task processing in the queue.
+  ///
+  /// If [tasks] or [group] are provided, pauses only those tasks.
+  /// If both are null, pauses all tasks.
+  ///
+  /// Default implementation is a no-op to ensure backwards compatibility
+  /// with subclasses that don't override this method
+  Future<void> pauseAll({Iterable<DownloadTask>? tasks, String? group}) async {}
+
+  /// Resumes task processing in the queue
+  ///
+  /// If [tasks] or [group] are provided, resumes only those tasks.
+  /// If both are null, resumes all tasks.
+  ///
+  /// Default implementation is a no-op to ensure backwards compatibility
+  /// with subclasses that don't override this method
+  Future<void> resumeAll(
+      {Iterable<DownloadTask>? tasks, String? group}) async {}
 }
 
 /// TaskQueue that holds all information in memory
@@ -39,12 +58,61 @@ class MemoryTaskQueue implements TaskQueue {
   /// Set of tasks that have been enqueued with the FileDownloader
   final enqueued = <Task>{}; // by TaskId
 
+  /// Active tasks count by hostname
+  final _activeByHost = <String, int>{};
+
+  /// Active tasks count by group
+  final _activeByGroup = <String, int>{};
+
   var _readyForEnqueue = Completer();
 
   final _enqueueErrorsStreamController = StreamController<Task>();
 
+  var _paused = false;
+  final _pausedTaskIds = <String>{};
+
   MemoryTaskQueue() {
     _readyForEnqueue.complete();
+  }
+
+  @override
+  Future<void> pauseAll({Iterable<DownloadTask>? tasks, String? group}) async {
+    if (tasks == null && group == null) {
+      _paused = true;
+    } else {
+      // pause specific tasks/groups
+      if (group != null) {
+        final tasksToPause = waiting.unorderedElements
+            .where((task) => task.group == group && task is DownloadTask);
+        _pausedTaskIds.addAll(tasksToPause.map((e) => e.taskId));
+      }
+      if (tasks != null) {
+        _pausedTaskIds.addAll(tasks.map((e) => e.taskId));
+      }
+    }
+  }
+
+  @override
+  Future<void> resumeAll({Iterable<DownloadTask>? tasks, String? group}) async {
+    if (tasks == null && group == null) {
+      _paused = false;
+      _pausedTaskIds.clear();
+    } else {
+      // resume specific tasks/groups
+      if (group != null) {
+        final tasksToResume = waiting.unorderedElements
+            .where((task) => task.group == group && task is DownloadTask);
+        for (final task in tasksToResume) {
+          _pausedTaskIds.remove(task.taskId);
+        }
+      }
+      if (tasks != null) {
+        for (final task in tasks) {
+          _pausedTaskIds.remove(task.taskId);
+        }
+      }
+    }
+    advanceQueue();
   }
 
   /// Add one [task] to the queue and advance the queue if possible
@@ -97,12 +165,16 @@ class MemoryTaskQueue implements TaskQueue {
     if (group == null) {
       removeAll();
       enqueued.clear();
+      _activeByHost.clear();
+      _activeByGroup.clear();
     } else {
       removeTasksWithGroup(group);
       final tasksToRemove =
           enqueued.where((task) => task.group != group).toList(growable: false);
       for (final task in tasksToRemove) {
-        enqueued.remove(task);
+        if (enqueued.remove(task)) {
+          _decrementCounts(task);
+        }
       }
     }
   }
@@ -113,6 +185,9 @@ class MemoryTaskQueue implements TaskQueue {
   /// next item in the queue is enqueued, so the queue keeps going until
   /// empty, or until it cannot enqueue another task
   void advanceQueue() async {
+    if (_paused) {
+      return;
+    }
     if (_readyForEnqueue.isCompleted) {
       final task = getNextTask();
       if (task == null) {
@@ -120,6 +195,7 @@ class MemoryTaskQueue implements TaskQueue {
       }
       _readyForEnqueue = Completer();
       enqueued.add(task);
+      _incrementCounts(task);
       enqueue(task).then((success) async {
         if (!success) {
           _log.warning(
@@ -143,6 +219,10 @@ class MemoryTaskQueue implements TaskQueue {
     final tasksThatHaveToWait = <Task>[];
     while (waiting.isNotEmpty) {
       var task = waiting.removeFirst();
+      if (_pausedTaskIds.contains(task.taskId)) {
+        tasksThatHaveToWait.add(task);
+        continue;
+      }
       if (numActiveWithHostname(task.hostName) < maxConcurrentByHost &&
           numActiveWithGroup(task.group) < maxConcurrentByGroup) {
         waiting.addAll(tasksThatHaveToWait); // put back in queue
@@ -166,6 +246,7 @@ class MemoryTaskQueue implements TaskQueue {
   @override
   void taskFinished(Task task) {
     if (enqueued.remove(task)) {
+      _decrementCounts(task);
       advanceQueue();
     }
   }
@@ -175,16 +256,44 @@ class MemoryTaskQueue implements TaskQueue {
   int get numActive => enqueued.length;
 
   /// Returns number of tasks active with this host name
-  int numActiveWithHostname(String hostname) => enqueued.fold(
-      0,
-      (previousValue, task) =>
-          task.hostName == hostname ? previousValue + 1 : previousValue);
+  int numActiveWithHostname(String hostname) => _activeByHost[hostname] ?? 0;
 
   /// Returns number of tasks active with this group
-  int numActiveWithGroup(String group) => enqueued.fold(
-      0,
-      (previousValue, task) =>
-          task.group == group ? previousValue + 1 : previousValue);
+  int numActiveWithGroup(String group) => _activeByGroup[group] ?? 0;
+
+  void _incrementCounts(Task task) {
+    try {
+      final host = task.hostName;
+      _activeByHost[host] = (_activeByHost[host] ?? 0) + 1;
+    } catch (_) {
+      // ignore invalid url
+    }
+    _activeByGroup[task.group] = (_activeByGroup[task.group] ?? 0) + 1;
+  }
+
+  void _decrementCounts(Task task) {
+    try {
+      final host = task.hostName;
+      if (_activeByHost.containsKey(host)) {
+        final newCount = _activeByHost[host]! - 1;
+        if (newCount <= 0) {
+          _activeByHost.remove(host);
+        } else {
+          _activeByHost[host] = newCount;
+        }
+      }
+    } catch (_) {
+      // ignore invalid url
+    }
+    if (_activeByGroup.containsKey(task.group)) {
+      final newCount = _activeByGroup[task.group]! - 1;
+      if (newCount <= 0) {
+        _activeByGroup.remove(task.group);
+      } else {
+        _activeByGroup[task.group] = newCount;
+      }
+    }
+  }
 
   /// True if queue is empty
   bool get isEmpty => waiting.isEmpty;

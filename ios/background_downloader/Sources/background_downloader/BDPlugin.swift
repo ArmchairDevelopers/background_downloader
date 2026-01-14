@@ -23,6 +23,7 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
     public static var keyConfigProxyPort = "com.bbflight.background_downloader.config.proxyPort"
     public static var keyConfigCheckAvailableSpace = "com.bbflight.background_downloader.config.checkAvailableSpace"
     public static var keyConfigExcludeFromCloudBackup = "com.bbflight.background_downloader.config.excludeFromCloudBackup"
+    public static var keyConfigSkipExistingFiles = "com.bbflight.background_downloader.config.skipExistingFiles"
     public static var keyRequireWiFi = "com.bbflight.background_downloader.requireWiFi"
     public static var forceFailPostOnBackgroundChannel = false
     
@@ -30,6 +31,7 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
                                         lastProgressValue: Double,
                                         lastTotalBytesDone: Int64,
                                         lastNetworkSpeed: Double)]() // upadtetime, progress %, bytes, speed
+    static var initialResponseDataProcessed = Set<String>() // by taskId
     static var uploaderForUrlSessionTaskIdentifier = [Int:Uploader]() // maps from UrlSessionTask TaskIdentifier
     static var haveregisteredNotificationCategories = false
     static var requireWiFi = RequireWiFi.asSetByTask // global setting
@@ -145,6 +147,8 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
                 methodConfigHoldingQueue(call: call, result: result)
             case "configExcludeFromCloudBackup":
                 storeInUserDefaults(key: BDPlugin.keyConfigExcludeFromCloudBackup, value: call.arguments, result: result)
+            case "configSkipExistingFiles":
+                storeInUserDefaults(key: BDPlugin.keyConfigSkipExistingFiles, value: call.arguments as? Int, result: result)
             case "platformVersion":
                 result(UIDevice.current.systemVersion)
             case "forceFailPostOnBackgroundChannel":
@@ -250,6 +254,27 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
             os_log("Could not decode %@ to Task", log: log, taskJsonString)
             return false
         }
+        // Check if the file should be skipped
+        if !isResume {
+            let skipThreshold = UserDefaults.standard.object(forKey: BDPlugin.keyConfigSkipExistingFiles) as? Int ?? -1
+            if skipThreshold != -1 {
+                let filePath = getFilePath(for: task)
+                if let path = filePath, FileManager.default.fileExists(atPath: path) {
+                    do {
+                        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+                        if let fileSize = attributes[.size] as? Int64 {
+                            if fileSize > skipThreshold * 1024 * 1024 {
+                                processStatusUpdate(task: task, status: .complete, responseStatusCode: 304)
+                                return true
+                            }
+                        }
+                    } catch {
+                        // Ignore
+                    }
+                }
+            }
+        }
+
         if notificationConfigJsonString != nil {
             BDPlugin.propertyLock.withLock {
                 BDPlugin.notificationConfigJsonStrings[task.taskId] = notificationConfigJsonString
@@ -267,8 +292,11 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
         var baseRequest = URLRequest(url: url)
         baseRequest.httpMethod = task.httpRequestMethod
         for (key, value) in task.headers {
-            // copy headers unless Range header in UploadTask
-            if key != "Range" || task.taskType != "UploadTask" {
+            // For UploadTask, copy headers
+            // unless it's "Range" or "Content-Disposition" (case-insensitive).
+            // For other task types, copy all headers.
+            if !isUploadTask(task: task) ||
+               (key.lowercased() != "range" && key.lowercased() != "content-disposition") {
                 baseRequest.setValue(value, forHTTPHeaderField: key)
             }
         }
@@ -308,6 +336,13 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
     }
     
     /// Schedule an upload task
+    ///
+    /// For binary uploads, the mime-type will be set to [Task.mimeType] and the Content-Disposition header will be:
+    /// - set to 'attachment = "filename"' if the task.headers field does not contain
+    ///   an entry for 'Content-Disposition'
+    /// - not set at all (i.e. omitted) if the task.headers field contains an entry
+    ///   for 'Content-Disposition' with the value '' (an empty string)
+    /// - set to the value of task.headers['Content-Disposition'] in all other cases
     private func scheduleUpload(task: Task, taskDescription: String, baseRequest: URLRequest, notificationConfigJsonString: String?) async -> Bool  {
         var request = baseRequest
         if isBinaryUploadTask(task: task) {
@@ -353,11 +388,18 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
                 ? getMimeType(fromFilename: fileUrl.path)
                 : task.mimeType ?? "application/octet-stream"
             request.setValue(resolvedMimeType, forHTTPHeaderField: "Content-Type")
-            if let encodedFilename = filename?.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
-                request.setValue("attachment; filename=\"\(encodedFilename)\"", forHTTPHeaderField: "Content-Disposition")
-            } else {
-                os_log("Could not encode task.fileName %@", log: log, type: .info, task.filename)
-                return false
+            let taskContentDisposition = task.headers["Content-Disposition"] ?? task.headers["content-disposition"]
+            if (taskContentDisposition != "") {
+                if taskContentDisposition == nil {
+                    if let encodedFilename = filename?.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+                        request.setValue("attachment; filename=\"\(encodedFilename)\"", forHTTPHeaderField: "Content-Disposition")
+                    } else {
+                        os_log("Could not encode task.fileName %@", log: log, type: .info, task.filename)
+                        return false
+                    }
+                } else {
+                    request.setValue(taskContentDisposition!, forHTTPHeaderField: "Content-Disposition")
+                }
             }
             var uploadFileUrl = fileUrl // if no range given
             if let rangeHeader = task.headers["Range"] {
@@ -461,12 +503,12 @@ public class BDPlugin: NSObject, FlutterPlugin, UNUserNotificationCenterDelegate
         let group = call.arguments as? String
         var tasksAsListOfJsonStrings = [String]()
         await BDPlugin.holdingQueue?.stateLock.lock()
-        if let heldTasksJsonStrings = BDPlugin.holdingQueue?.allTasks(group: group).map({jsonStringFor(task: $0)}).filter({$0 != nil}).map({$0!}) {
+        if let heldTasksJsonStrings = BDPlugin.holdingQueue?.allTasks(group: group).compactMap({jsonStringFor(task: $0)}) {
             tasksAsListOfJsonStrings.append(contentsOf:  heldTasksJsonStrings)
         }
         UrlSessionDelegate.createUrlSession()
         if let urlSessionTasks = await UrlSessionDelegate.urlSession?.allTasks {
-            tasksAsListOfJsonStrings.append(contentsOf: urlSessionTasks.filter({ $0.state == .running || $0.state == .suspended }).map({ getTaskFrom(urlSessionTask: $0)}).filter({group == nil || $0?.group == group }).map({ jsonStringFor(task: $0!) }).filter({ $0 != nil }).map({$0!}))
+            tasksAsListOfJsonStrings.append(contentsOf: urlSessionTasks.filter({ $0.state == .running || $0.state == .suspended }).compactMap({ getTaskFrom(urlSessionTask: $0)}).filter({group == nil || $0.group == group }).compactMap({ jsonStringFor(task: $0) }))
         }
         await BDPlugin.holdingQueue?.stateLock.unlock()
         os_log("Returning %d unfinished tasks", log: log, type: .debug, tasksAsListOfJsonStrings.count)

@@ -2,8 +2,8 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show Random;
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 import 'package:mime/mime.dart';
@@ -21,11 +21,13 @@ import 'web_downloader.dart'
 part 'uri/uri_task.dart';
 
 final _log = Logger('FileDownloader');
+final _random = Random();
 
 /// A server Request
 ///
 /// An equality test on a [Request] is an equality test on the [url]
 base class Request {
+  /// List of valid HTTP methods
   final validHttpMethods = ['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'PATCH'];
 
   /// String representation of the url, urlEncoded
@@ -125,9 +127,9 @@ base class Request {
       };
 
   /// The regex pattern to split the cookies in `Set-Cookie`.
-  static final _regexSplitSetCookies = RegExp(',(?=[^ ])');
+  static final _splitSetCookiesRegExp = RegExp(',(?=[^ ])');
 
-  /// Returns the cookie header appropriate for this [request],
+  /// Returns the cookie header appropriate for this [Request],
   /// taken from the [cookies] list.
   ///
   /// [cookies] can be a `List<Cookie>` or the 'Set-Cookie' header value
@@ -173,7 +175,7 @@ base class Request {
   static List<Cookie> cookiesFromSetCookie(String setCookie) {
     final cookies = <Cookie>[];
     if (setCookie.isNotEmpty) {
-      for (final cookie in setCookie.split(_regexSplitSetCookies)) {
+      for (final cookie in setCookie.split(_splitSetCookiesRegExp)) {
         cookies.add(Cookie.fromSetCookieValue(cookie));
       }
     }
@@ -203,9 +205,10 @@ base class Request {
   }
 }
 
-/// RegEx to match a path separator
-final _pathSeparator = RegExp(r'[/\\]');
-final _startsWithPathSeparator = RegExp(r'^[/\\]');
+/// RegExp to match a path separator and root directory
+final _pathSeparatorRegExp = RegExp(r'[/\\]');
+final _startsWithPathSeparatorRegExp = RegExp(r'^[/\\]');
+final _rootDirectoryRegExp = RegExp(r'^(/|\\|([a-zA-Z]:[\\/]))');
 
 /// Information related to a [Task]
 ///
@@ -259,6 +262,22 @@ sealed class Task extends Request implements Comparable {
   final TaskOptions? options;
 
   static bool useExternalStorage = false; // for Android configuration only
+
+  static final _baseDirectoryPathCache = <(BaseDirectory, bool), String>{};
+
+  static const _androidBaseDirs = [
+    BaseDirectory.temporary,
+    BaseDirectory.applicationLibrary,
+    BaseDirectory.applicationSupport,
+    BaseDirectory.applicationDocuments
+  ];
+
+  static const _otherBaseDirs = [
+    BaseDirectory.temporary,
+    BaseDirectory.applicationSupport,
+    BaseDirectory.applicationLibrary,
+    BaseDirectory.applicationDocuments
+  ];
 
   /// Uri schemes that are supported by the downloader in the context of
   /// a [Task] download directory or upload file
@@ -319,9 +338,9 @@ sealed class Task extends Request implements Comparable {
       this.priority = 5,
       super.creationTime,
       this.options})
-      : taskId = taskId ?? Random().nextInt(1 << 32).toString(),
-        filename = filename ?? Random().nextInt(1 << 32).toString(),
-        directory = _startsWithPathSeparator.hasMatch(directory)
+      : taskId = taskId ?? _random.nextInt(1 << 32).toString(),
+        filename = filename ?? _random.nextInt(1 << 32).toString(),
+        directory = _startsWithPathSeparatorRegExp.hasMatch(directory)
             ? directory.substring(1)
             : directory {
     if (filename?.isEmpty == true) {
@@ -329,7 +348,7 @@ sealed class Task extends Request implements Comparable {
     }
     if (this is! UriTask &&
         this is! MultiUploadTask &&
-        _pathSeparator.hasMatch(this.filename)) {
+        _pathSeparatorRegExp.hasMatch(this.filename)) {
       throw ArgumentError('Filename cannot contain path separators');
     }
     if (allowPause && post != null) {
@@ -341,6 +360,8 @@ sealed class Task extends Request implements Comparable {
   }
 
   /// Create a new [Task] subclass from the provided [json]
+  ///
+  /// Use [Task.createFromJson] to create a properly subclassed [Task] from the [json]
   factory Task.createFromJson(Map<String, dynamic> json) =>
       switch (json['taskType']) {
         'DownloadTask' => DownloadTask.fromJson(json),
@@ -380,11 +401,12 @@ sealed class Task extends Request implements Comparable {
         if (t.fileUri != null) {
           assert(t.fileUri?.scheme == 'file',
               'fileUri must be a URI scheme to return a path');
-          return t.fileUri!.toFilePath(windows: Platform.isWindows);
+          return t.fileUri!.toFilePath(
+              windows: defaultTargetPlatform == TargetPlatform.windows);
         } else {
           assert(t.directoryUri?.scheme == 'file',
               'directoryUri must be a URI scheme to return a path');
-          return '${t.directoryUri!.toFilePath(windows: Platform.isWindows)}${Platform.pathSeparator}${withFilename ?? filename}';
+          return '${t.directoryUri!.toFilePath(windows: defaultTargetPlatform == TargetPlatform.windows)}${Platform.pathSeparator}${withFilename ?? filename}';
         }
       default:
         return p.join(await baseDirectoryPath(baseDirectory), directory,
@@ -398,6 +420,10 @@ sealed class Task extends Request implements Comparable {
   /// because the drive letter is required to be included in the directory
   /// path
   static Future<String> baseDirectoryPath(BaseDirectory baseDirectory) async {
+    final cacheKey = (baseDirectory, Task.useExternalStorage);
+    if (_baseDirectoryPathCache.containsKey(cacheKey)) {
+      return _baseDirectoryPathCache[cacheKey]!;
+    }
     Directory? externalStorageDirectory;
     Directory? externalCacheDirectory;
     if (Task.useExternalStorage) {
@@ -415,7 +441,8 @@ sealed class Task extends Request implements Comparable {
       (BaseDirectory.applicationSupport, false) =>
         await getApplicationSupportDirectory(),
       (BaseDirectory.applicationLibrary, false)
-          when Platform.isMacOS || Platform.isIOS =>
+          when defaultTargetPlatform == TargetPlatform.macOS ||
+              defaultTargetPlatform == TargetPlatform.iOS =>
         await getLibraryDirectory(),
       (BaseDirectory.applicationLibrary, false) => Directory(
           p.join((await getApplicationSupportDirectory()).path, 'Library')),
@@ -428,9 +455,12 @@ sealed class Task extends Request implements Comparable {
       (BaseDirectory.applicationLibrary, true) =>
         Directory(p.join(externalStorageDirectory!.path, 'Library'))
     };
-    return (Platform.isWindows && baseDirectory == BaseDirectory.root)
+    final path = (defaultTargetPlatform == TargetPlatform.windows &&
+            baseDirectory == BaseDirectory.root)
         ? ''
         : baseDir.absolute.path;
+    _baseDirectoryPathCache[cacheKey] = path;
+    return path;
   }
 
   /// Extract the baseDirectory, directory and filename from
@@ -451,20 +481,11 @@ sealed class Task extends Request implements Comparable {
     // try to match the start of the absoluteDirectory to one of the
     // directories represented by the BaseDirectory enum.
     // Order matters, as some may be subdirs of others
-    final testSequence =
-        Platform.isAndroid || Platform.isLinux || Platform.isWindows
-            ? [
-                BaseDirectory.temporary,
-                BaseDirectory.applicationLibrary,
-                BaseDirectory.applicationSupport,
-                BaseDirectory.applicationDocuments
-              ]
-            : [
-                BaseDirectory.temporary,
-                BaseDirectory.applicationSupport,
-                BaseDirectory.applicationLibrary,
-                BaseDirectory.applicationDocuments
-              ];
+    final testSequence = defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.windows
+        ? _androidBaseDirs
+        : _otherBaseDirs;
     for (final baseDirectoryEnum in testSequence) {
       final baseDirPath = await baseDirectoryPath(baseDirectoryEnum);
       final (match, directory) = _contains(baseDirPath, absoluteDirectoryPath);
@@ -474,8 +495,7 @@ sealed class Task extends Request implements Comparable {
     }
     // if no match, return a BaseDirectory.root with the absoluteDirectory
     // minus the leading characters that designate the root (differs by platform)
-    final match =
-        RegExp(r'^(/|\\|([a-zA-Z]:[\\/]))').firstMatch(absoluteDirectoryPath);
+    final match = _rootDirectoryRegExp.firstMatch(absoluteDirectoryPath);
     return (
       BaseDirectory.root,
       absoluteDirectoryPath.substring(match?.end ?? 0),
@@ -520,7 +540,7 @@ sealed class Task extends Request implements Comparable {
 
   /// Creates [Task] object from JsonMap
   ///
-  /// Only used by subclasses. Use [createFromJsonMap] to create a properly
+  /// Only used by subclasses. Use [Task.createFromJson] to create a properly
   /// subclassed [Task] from the [json]
   Task.fromJson(super.json)
       : taskId = json['taskId'] ?? '',
@@ -738,7 +758,7 @@ final class DownloadTask extends Task {
   /// The suggested filename is obtained by making a HEAD request to the url
   /// represented by the [DownloadTask], including urlQueryParameters and headers
   Future<DownloadTask> withSuggestedFilename(
-      {unique = false,
+      {bool unique = false,
       Future<DownloadTask> Function(
               DownloadTask task, Map<String, String> headers, bool unique)
           taskWithFilenameBuilder = taskWithSuggestedFilename}) async {
@@ -792,7 +812,7 @@ final class UploadTask extends Task {
   /// Map of name/value pairs to encode as form fields in a multi-part upload.
   /// To specify multiple values for a single name, format the value as
   /// '"value1", "value2", "value3"' so that it matches the following
-  /// RegEx: ^(?:"[^"]+"\s*,\s*)+"[^"]+"$
+  /// RegEx: `^(?:"[^"]+"\s*,\s*)+"[^"]+"$`
   final Map<String, String> fields;
 
   /// Creates [UploadTask]
@@ -928,7 +948,8 @@ final class UploadTask extends Task {
     for (int i = 0; i < fileFields.length; i++) {
       final fileUri = Uri.tryParse(filenames[i]);
       final filenameOrPath = (fileUri?.scheme == 'file')
-          ? fileUri!.toFilePath(windows: Platform.isWindows)
+          ? fileUri!.toFilePath(
+              windows: defaultTargetPlatform == TargetPlatform.windows)
           : filenames[i];
       final file = File(filenameOrPath);
       if (await file.exists()) {
@@ -1373,7 +1394,7 @@ final class DataTask extends Task {
   /// [displayName] human readable name for this task
   /// [creationTime] time of task creation, 'now' by default.
   DataTask(
-      {String? taskId,
+      {super.taskId,
       required super.url,
       super.urlQueryParameters,
       super.headers,

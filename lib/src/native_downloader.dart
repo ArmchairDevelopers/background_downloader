@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -12,7 +11,9 @@ import 'chunk.dart';
 import 'exceptions.dart';
 import 'file_downloader.dart';
 import 'models.dart';
+import 'json_processor.dart';
 import 'permissions.dart';
+import 'queue/serial_job_queue.dart';
 import 'task.dart';
 
 /// Implementation of download functionality for native platforms
@@ -24,6 +25,8 @@ abstract base class NativeDownloader extends BaseDownloader {
   static const _backgroundChannel =
       MethodChannel('com.bbflight.background_downloader.background');
 
+  late final SerialJobQueue<MethodCall, dynamic> _jobQueue;
+
   /// Initializes the background channel and starts listening for messages from
   /// the native side
   @override
@@ -32,195 +35,191 @@ abstract base class NativeDownloader extends BaseDownloader {
     WidgetsFlutterBinding.ensureInitialized();
     // listen to the background channel, receiving updates on download status
     // or progress.
-    // First argument is the Task as JSON string, next argument(s) depends
-    // on the method.
-    //
-    // If the task JsonString is empty, a dummy task will be created
-    _backgroundChannel.setMethodCallHandler((call) async {
-      final args = call.arguments as List<dynamic>;
-      var taskJsonString = args.first as String;
-      final task = taskJsonString.isNotEmpty
-          ? Task.createFromJson(jsonDecode(taskJsonString))
-          : DownloadTask(url: 'url');
-      final message = (
-        call.method,
-        args.length > 2
-            ? args.getRange(1, args.length).toList(growable: false)
-            : args[1]
-      );
-      switch (message) {
-        // simple status update
-        case ('statusUpdate', int statusOrdinal):
-          final status = TaskStatus.values[statusOrdinal];
-          if (task.group != BaseDownloader.chunkGroup) {
-            processStatusUpdate(TaskStatusUpdate(task, status));
-          } else {
-            // this is a chunk task, so pass to native
-            Future.delayed(const Duration(milliseconds: 100)).then((_) =>
-                methodChannel.invokeMethod('chunkStatusUpdate', [
-                  Chunk.getParentTaskId(task),
-                  task.taskId,
-                  status.index,
-                  null,
-                  null
-                ]));
-          }
+    // The job queue ensures that messages are processed in order, even though
+    // the processing itself is asynchronous (using [compute])
+    _jobQueue = SerialJobQueue(_handleBackgroundMessage);
+    _backgroundChannel.setMethodCallHandler(_jobQueue.add);
+  }
 
-        // status update with responseBody, responseHeaders, responseStatusCode, mimeType and charSet (normal completion)
-        case (
-            'statusUpdate',
-            [
-              int statusOrdinal,
-              String? responseBody,
-              Map<Object?, Object?>? responseHeaders,
-              int? responseStatusCode,
-              String? mimeType,
-              String? charSet
-            ]
-          ):
-          final status = TaskStatus.values[statusOrdinal];
-          if (task.group != BaseDownloader.chunkGroup) {
-            final Map<String, String>? cleanResponseHeaders = responseHeaders ==
-                    null
-                ? null
-                : {
-                    for (var entry in responseHeaders.entries.where(
-                        (entry) => entry.key != null && entry.value != null))
-                      entry.key.toString().toLowerCase(): entry.value.toString()
-                  };
-            processStatusUpdate(TaskStatusUpdate(
-                task,
-                status,
+  /// Handles the background message
+  ///
+  /// First argument is the Task as JSON string, next argument(s) depends
+  /// on the method.
+  ///
+  /// If the task JsonString is empty, a dummy task will be created
+  Future<dynamic> _handleBackgroundMessage(MethodCall call) async {
+    final args = call.arguments as List<dynamic>;
+    var taskJsonString = args.first as String;
+    final task = taskJsonString.isNotEmpty
+        ? await JsonProcessor().decodeTask(taskJsonString)
+        : DownloadTask(url: 'url');
+    final message = (
+      call.method,
+      args.length > 2
+          ? args.getRange(1, args.length).toList(growable: false)
+          : args[1]
+    );
+    switch (message) {
+      // simple status update
+      case ('statusUpdate', int statusOrdinal):
+        final status = TaskStatus.values[statusOrdinal];
+        if (task.group != BaseDownloader.chunkGroup) {
+          processStatusUpdate(TaskStatusUpdate(task, status));
+        } else {
+          // this is a chunk task, so pass to native
+          Future.delayed(const Duration(milliseconds: 100)).then((_) =>
+              methodChannel.invokeMethod('chunkStatusUpdate', [
+                Chunk.getParentTaskId(task),
+                task.taskId,
+                status.index,
                 null,
-                responseBody,
-                cleanResponseHeaders,
-                responseStatusCode,
-                mimeType,
-                charSet));
-          } else {
-            // this is a chunk task, so pass to native
-            Future.delayed(const Duration(milliseconds: 100)).then((_) =>
-                methodChannel.invokeMethod('chunkStatusUpdate', [
-                  Chunk.getParentTaskId(task),
-                  task.taskId,
-                  status.index,
-                  null,
-                  responseBody
-                ]));
-          }
+                null
+              ]));
+        }
 
-        // status update with TaskException and responseBody
-        case (
-            'statusUpdate',
-            [
-              int statusOrdinal,
-              String typeString,
-              String description,
-              int httpResponseCode,
-              String? responseBody
-            ]
-          ):
-          final status = TaskStatus.values[statusOrdinal];
-          TaskException? exception;
-          if (status == TaskStatus.failed) {
-            exception = TaskException.fromTypeString(
-                typeString, description, httpResponseCode);
-          }
-          if (task.group != BaseDownloader.chunkGroup) {
-            processStatusUpdate(
-                TaskStatusUpdate(task, status, exception, responseBody));
-          } else {
-            // this is a chunk task, so pass to native
-            Future.delayed(const Duration(milliseconds: 100))
-                .then((_) => methodChannel.invokeMethod('chunkStatusUpdate', [
-                      Chunk.getParentTaskId(task),
-                      task.taskId,
-                      status.index,
-                      exception?.toJsonString(),
-                      responseBody
-                    ]));
-          }
+      // status update with responseBody, responseHeaders, responseStatusCode, mimeType and charSet (normal completion)
+      case (
+          'statusUpdate',
+          [
+            int statusOrdinal,
+            String? responseBody,
+            Map<Object?, Object?>? responseHeaders,
+            int? responseStatusCode,
+            String? mimeType,
+            String? charSet
+          ]
+        ):
+        final status = TaskStatus.values[statusOrdinal];
+        if (task.group != BaseDownloader.chunkGroup) {
+          final Map<String, String>? cleanResponseHeaders =
+              responseHeaders == null
+                  ? null
+                  : {
+                      for (var entry in responseHeaders.entries.where(
+                          (entry) => entry.key != null && entry.value != null))
+                        entry.key.toString().toLowerCase():
+                            entry.value.toString()
+                    };
+          processStatusUpdate(TaskStatusUpdate(task, status, null, responseBody,
+              cleanResponseHeaders, responseStatusCode, mimeType, charSet));
+        } else {
+          // this is a chunk task, so pass to native
+          Future.delayed(const Duration(milliseconds: 100)).then((_) =>
+              methodChannel.invokeMethod('chunkStatusUpdate', [
+                Chunk.getParentTaskId(task),
+                task.taskId,
+                status.index,
+                null,
+                responseBody
+              ]));
+        }
 
-        case (
-            'progressUpdate',
-            [
-              double progress,
-              int expectedFileSize,
-              double networkSpeed,
-              int timeRemaining
-            ]
-          ):
-          if (task.group != BaseDownloader.chunkGroup) {
-            processProgressUpdate(TaskProgressUpdate(
-                task,
-                progress,
-                expectedFileSize,
-                networkSpeed,
-                Duration(milliseconds: timeRemaining)));
-          } else {
-            // this is a chunk task, so pass parent taskId,
-            // chunk taskId and progress to native
-            Future.delayed(const Duration(milliseconds: 100)).then((_) =>
-                methodChannel.invokeMethod('chunkProgressUpdate',
-                    [Chunk.getParentTaskId(task), task.taskId, progress]));
-          }
-
-        case ('canResume', bool canResume):
-          setCanResume(task, canResume);
-
-        // resumeData Android and Desktop variant
-        case ('resumeData', [String data, int requiredStartByte, String? eTag]):
-          setResumeData(ResumeData(task, data, requiredStartByte, eTag));
-
-        // resumeData iOS and ParallelDownloads variant
-        case ('resumeData', String data):
-          setResumeData(ResumeData(task, data));
-
-        case ('notificationTap', int notificationTypeOrdinal):
-          final notificationType =
-              NotificationType.values[notificationTypeOrdinal];
-          processNotificationTap(task, notificationType);
-          return true; // this message requires a confirmation
-
-        // from ParallelDownloadTask
-        case ('enqueueChild', String childTaskJsonString):
-          final childTask =
-              Task.createFromJson(jsonDecode(childTaskJsonString));
+      // status update with TaskException and responseBody
+      case (
+          'statusUpdate',
+          [
+            int statusOrdinal,
+            String typeString,
+            String description,
+            int httpResponseCode,
+            String? responseBody
+          ]
+        ):
+        final status = TaskStatus.values[statusOrdinal];
+        TaskException? exception;
+        if (status == TaskStatus.failed) {
+          exception = TaskException.fromTypeString(
+              typeString, description, httpResponseCode);
+        }
+        if (task.group != BaseDownloader.chunkGroup) {
+          processStatusUpdate(
+              TaskStatusUpdate(task, status, exception, responseBody));
+        } else {
+          // this is a chunk task, so pass to native
           Future.delayed(const Duration(milliseconds: 100))
-              .then((_) => FileDownloader().enqueue(childTask));
+              .then((_) => methodChannel.invokeMethod('chunkStatusUpdate', [
+                    Chunk.getParentTaskId(task),
+                    task.taskId,
+                    status.index,
+                    exception?.toJsonString(),
+                    responseBody
+                  ]));
+        }
 
-        // from ParallelDownloadTask
-        case ('cancelTasksWithId', String listOfTaskIdsJson):
-          final taskIds = List<String>.from(jsonDecode(listOfTaskIdsJson));
-          Future.delayed(const Duration(milliseconds: 100))
-              .then((_) => FileDownloader().cancelTasksWithIds(taskIds));
+      case (
+          'progressUpdate',
+          [
+            double progress,
+            int expectedFileSize,
+            double networkSpeed,
+            int timeRemaining
+          ]
+        ):
+        if (task.group != BaseDownloader.chunkGroup) {
+          processProgressUpdate(TaskProgressUpdate(
+              task,
+              progress,
+              expectedFileSize,
+              networkSpeed,
+              Duration(milliseconds: timeRemaining)));
+        } else {
+          // this is a chunk task, so pass parent taskId,
+          // chunk taskId and progress to native
+          Future.delayed(const Duration(milliseconds: 100)).then((_) =>
+              methodChannel.invokeMethod('chunkProgressUpdate',
+                  [Chunk.getParentTaskId(task), task.taskId, progress]));
+        }
 
-        // from ParallelDownloadTask
-        case ('pauseTasks', String listOfTasksJson):
-          final listOfTasks = List<DownloadTask>.from(jsonDecode(
-              listOfTasksJson,
-              reviver: (key, value) => switch (key) {
-                    int _ => Task.createFromJson(value as Map<String, dynamic>),
-                    _ => value
-                  }));
-          Future.delayed(const Duration(milliseconds: 100)).then((_) async {
-            for (final chunkTask in listOfTasks) {
-              await FileDownloader().pause(chunkTask);
-            }
-          });
+      case ('canResume', bool canResume):
+        setCanResume(task, canResume);
 
-        // for permission request results
-        case ('permissionRequestResult', int statusOrdinal):
-          permissionsService.onPermissionRequestResult(
-              PermissionStatus.values[statusOrdinal]);
+      // resumeData Android and Desktop variant
+      case ('resumeData', [String data, int requiredStartByte, String? eTag]):
+        setResumeData(ResumeData(task, data, requiredStartByte, eTag));
 
-        default:
-          log.warning('Background channel: no match for message $message');
-          throw ArgumentError(
-              'Background channel: no match for message $message');
-      }
-      return true;
-    });
+      // resumeData iOS and ParallelDownloads variant
+      case ('resumeData', String data):
+        setResumeData(ResumeData(task, data));
+
+      case ('notificationTap', int notificationTypeOrdinal):
+        final notificationType =
+            NotificationType.values[notificationTypeOrdinal];
+        processNotificationTap(task, notificationType);
+        return true; // this message requires a confirmation
+
+      // from ParallelDownloadTask
+      case ('enqueueChild', String childTaskJsonString):
+        final childTask = await JsonProcessor().decodeTask(childTaskJsonString);
+        Future.delayed(const Duration(milliseconds: 100))
+            .then((_) => FileDownloader().enqueue(childTask));
+
+      // from ParallelDownloadTask
+      case ('cancelTasksWithId', String listOfTaskIdsJson):
+        final taskIds = List<String>.from(jsonDecode(listOfTaskIdsJson));
+        Future.delayed(const Duration(milliseconds: 100))
+            .then((_) => FileDownloader().cancelTasksWithIds(taskIds));
+
+      // from ParallelDownloadTask
+      case ('pauseTasks', String listOfTasksJson):
+        final listOfTasks =
+            await JsonProcessor().decodeDownloadTaskList(listOfTasksJson);
+        Future.delayed(const Duration(milliseconds: 100)).then((_) async {
+          for (final chunkTask in listOfTasks) {
+            await FileDownloader().pause(chunkTask);
+          }
+        });
+
+      // for permission request results
+      case ('permissionRequestResult', int statusOrdinal):
+        permissionsService
+            .onPermissionRequestResult(PermissionStatus.values[statusOrdinal]);
+
+      default:
+        log.warning('Background channel: no match for message $message');
+        throw ArgumentError(
+            'Background channel: no match for message $message');
+    }
+    return true;
   }
 
   @override
@@ -241,30 +240,13 @@ abstract base class NativeDownloader extends BaseDownloader {
     for (final task in tasks.where((task) => task.allowPause)) {
       canResumeTask[task] = Completer();
     }
-    final (
-      String tasksJsonString,
-      String notificationConfigsJsonString
-    ) = await compute(
-        _taskAndNotificationConfigJsonStrings, (tasks, notificationConfigs));
+    final (String tasksJsonString, String notificationConfigsJsonString) =
+        await JsonProcessor()
+            .encodeTaskAndNotificationConfig(tasks, notificationConfigs);
     final result = await methodChannel.invokeMethod<List<Object?>>(
             'enqueueAll', [tasksJsonString, notificationConfigsJsonString]) ??
         [];
     return result.map((item) => item is bool ? item : false).toList();
-  }
-
-  static (String, String) _taskAndNotificationConfigJsonStrings(
-      (
-        Iterable<Task>,
-        Set<TaskNotificationConfig>
-      ) tasksAndNotificationConfigs) {
-    final (tasks, notificationConfigs) = tasksAndNotificationConfigs;
-    final tasksJsonString = jsonEncode(tasks);
-    final configs = tasks
-        .map((task) => BaseDownloader.notificationConfigForTaskUsingConfigSet(
-            task, notificationConfigs))
-        .toList();
-    final notificationConfigsJsonString = jsonEncode(configs);
-    return (tasksJsonString, notificationConfigsJsonString);
   }
 
   @override
@@ -283,9 +265,7 @@ abstract base class NativeDownloader extends BaseDownloader {
     final result = await methodChannel.invokeMethod<List<dynamic>?>(
             'allTasks', allGroups ? null : group) ??
         [];
-    final tasks = result
-        .map((e) => Task.createFromJson(jsonDecode(e as String)))
-        .toList();
+    final tasks = await JsonProcessor().decodeTaskList(result);
     return [...retryAndPausedTasks, ...tasks];
   }
 
@@ -425,7 +405,7 @@ abstract base class NativeDownloader extends BaseDownloader {
 
   @override
   Future<Duration> getTaskTimeout() async {
-    if (Platform.isAndroid) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       final timeoutMillis =
           await methodChannel.invokeMethod<int>('getTaskTimeout') ?? 0;
       return Duration(milliseconds: timeoutMillis);
@@ -493,6 +473,20 @@ abstract base class NativeDownloader extends BaseDownloader {
       case (Config.holdingQueue, false):
         await NativeDownloader.methodChannel
             .invokeMethod('configHoldingQueue', []);
+
+      case (Config.skipExistingFiles, int value):
+        await NativeDownloader.methodChannel
+            .invokeMethod('configSkipExistingFiles', value);
+
+      case (Config.skipExistingFiles, Config.never):
+      case (Config.skipExistingFiles, false):
+        await NativeDownloader.methodChannel
+            .invokeMethod('configSkipExistingFiles', -1);
+
+      case (Config.skipExistingFiles, Config.always):
+      case (Config.skipExistingFiles, true):
+        await NativeDownloader.methodChannel
+            .invokeMethod('configSkipExistingFiles', 0);
 
       default:
         return (

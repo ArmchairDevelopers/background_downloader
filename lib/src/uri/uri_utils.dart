@@ -5,6 +5,7 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 
@@ -27,9 +28,9 @@ sealed class UriUtils {
 
   factory UriUtils.withDownloader(BaseDownloader downloader) =>
       switch (downloader) {
-        AndroidDownloader() => AndroidUriUtils(downloader),
-        IOSDownloader() => IOSUriUtils(downloader),
-        _ => DesktopUriUtils(downloader)
+        AndroidDownloader() => _AndroidUriUtils(downloader),
+        IOSDownloader() => _IOSUriUtils(downloader),
+        _ => _DesktopUriUtils(downloader)
       };
 
   /// Opens a directory picker dialog and returns the selected directory's URI.
@@ -163,7 +164,7 @@ sealed class UriUtils {
   /// Move the file represented by the [task] to a shared storage
   /// [destination] and potentially a [directory] within that destination. If
   /// the [mimeType] is not provided we will attempt to derive it from the
-  /// [Task.fileUri]
+  /// [UriTask.fileUri]
   ///
   /// Returns the Uri of the stored file, or null if not successful.
   ///
@@ -222,7 +223,7 @@ sealed class UriUtils {
     return uriString != null ? Uri.tryParse(uriString) : null;
   }
 
-  /// Returns the Uri of the file represented by [filePath] in shared
+  /// Returns the Uri of the file represented by [fileUri] in shared
   /// storage [destination] and potentially a [directory] within that
   /// destination.
   ///
@@ -254,8 +255,8 @@ sealed class UriUtils {
   }
 }
 
-final class DesktopUriUtils extends UriUtils {
-  DesktopUriUtils(super.downloader);
+final class _DesktopUriUtils extends UriUtils {
+  _DesktopUriUtils(super.downloader);
 
   @override
   Future<Uri?> pickDirectory(
@@ -371,11 +372,11 @@ final class DesktopUriUtils extends UriUtils {
   }
 }
 
-final class NativeUriUtils extends UriUtils {
+final class _NativeUriUtils extends UriUtils {
   final _methodChannel =
       MethodChannel('com.bbflight.background_downloader.uriutils');
 
-  NativeUriUtils(super.downloader);
+  _NativeUriUtils(super.downloader);
 
   @override
   Future<Uri?> pickDirectory(
@@ -499,12 +500,12 @@ final class NativeUriUtils extends UriUtils {
   }
 }
 
-final class AndroidUriUtils extends NativeUriUtils {
-  AndroidUriUtils(super.downloader);
+final class _AndroidUriUtils extends _NativeUriUtils {
+  _AndroidUriUtils(super.downloader);
 }
 
-final class IOSUriUtils extends NativeUriUtils {
-  IOSUriUtils(super.downloader);
+final class _IOSUriUtils extends _NativeUriUtils {
+  _IOSUriUtils(super.downloader);
 
   @override
   Future<Uri?> activate(Uri uri) async {
@@ -521,14 +522,16 @@ final class IOSUriUtils extends NativeUriUtils {
 
 /// Extensions on String related to Uri and File
 extension StringUriExtensions on String {
-  /// Converts a [filePath] to a file URI
-  Uri toFileUri() => Uri.file(this, windows: Platform.isWindows);
+  /// Converts this filePath to a file URI
+  Uri toFileUri() =>
+      Uri.file(this, windows: defaultTargetPlatform == TargetPlatform.windows);
 }
 
 /// Extensions on Uri related to File and String
 extension UriExtensions on Uri {
   /// Returns the File represented by this [uri]
-  File toFile() => File(toFilePath(windows: Platform.isWindows));
+  File toFile() => File(
+      toFilePath(windows: defaultTargetPlatform == TargetPlatform.windows));
 
   /// True if Uri scheme is file
   bool get isFileUri => scheme == 'file';

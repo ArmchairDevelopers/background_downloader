@@ -45,6 +45,7 @@ final class DesktopDownloader extends BaseDownloader {
   static Duration? _requestTimeout;
   static var _proxy = <String, dynamic>{}; // 'address' and 'port'
   static var _bypassTLSCertificateValidation = false;
+  static int _skipExistingFiles = -1;
 
   factory DesktopDownloader() => _singleton;
 
@@ -125,6 +126,20 @@ final class DesktopDownloader extends BaseDownloader {
   /// 'forwarded' to the [backgroundChannel] and processed by the
   /// [FileDownloader]
   Future<void> _executeTask(Task task) async {
+    // Check if the file should be skipped
+    if (task is DownloadTask && _skipExistingFiles != -1) {
+      final filePath = await task.filePath();
+      final file = File(filePath);
+      if (await file.exists()) {
+        final fileSize = await file.length();
+        if (fileSize > _skipExistingFiles * 1024 * 1024) {
+          processStatusUpdate(TaskStatusUpdate(
+              task, TaskStatus.complete, null, null, null, 304));
+          return;
+        }
+      }
+    }
+
     final resumeData = await getResumeData(task.taskId);
     if (resumeData != null) {
       await removeResumeData(task.taskId);
@@ -414,7 +429,8 @@ final class DesktopDownloader extends BaseDownloader {
       {bool asUriString = false}) async {
     final fileUri = Uri.tryParse(filePath);
     if (fileUri case Uri(scheme: 'file')) {
-      filePath = fileUri.toFilePath(windows: Platform.isWindows);
+      filePath = fileUri.toFilePath(
+          windows: defaultTargetPlatform == TargetPlatform.windows);
     }
     final destDirectoryPath =
         await getDestinationDirectoryPath(destination, directory);
@@ -475,9 +491,9 @@ final class DesktopDownloader extends BaseDownloader {
 
   @override
   Future<bool> openFile(Task? task, String? filePath, String? mimeType) async {
-    final executable = Platform.isLinux
+    final executable = defaultTargetPlatform == TargetPlatform.linux
         ? 'xdg-open'
-        : Platform.isMacOS
+        : defaultTargetPlatform == TargetPlatform.macOS
             ? 'open'
             : 'start';
     filePath ??= await task!.filePath();
@@ -552,6 +568,17 @@ final class DesktopDownloader extends BaseDownloader {
         maxConcurrentByHost = unlimited;
         maxConcurrentByGroup = unlimited;
 
+      case (Config.skipExistingFiles, int value):
+        _skipExistingFiles = value;
+
+      case (Config.skipExistingFiles, Config.never):
+      case (Config.skipExistingFiles, false):
+        _skipExistingFiles = -1;
+
+      case (Config.skipExistingFiles, Config.always):
+      case (Config.skipExistingFiles, true):
+        _skipExistingFiles = 0;
+
       default:
         return (
           configItem.$1,
@@ -602,7 +629,7 @@ final class DesktopDownloader extends BaseDownloader {
   }
 
   /// Recreates the [httpClient] used for Requests and isolate downloads/uploads
-  static _recreateClient() {
+  static void _recreateClient() {
     final client = HttpClient();
     client.connectionTimeout = requestTimeout;
     client.findProxy = proxy.isNotEmpty

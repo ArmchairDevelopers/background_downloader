@@ -118,14 +118,16 @@ abstract base class BaseDownloader {
 
   factory BaseDownloader.instance(
       PersistentStorage persistentStorage, Database database) {
-    final instance = Platform.isAndroid
-        ? AndroidDownloader()
-        : Platform.isIOS
-            ? IOSDownloader()
-            : Platform.isLinux || Platform.isMacOS || Platform.isWindows
-                ? DesktopDownloader()
-                : throw ArgumentError(
-                    '${Platform.operatingSystem} is not a supported platform');
+    final instance = switch (defaultTargetPlatform) {
+      TargetPlatform.android => AndroidDownloader(),
+      TargetPlatform.iOS => IOSDownloader(),
+      TargetPlatform.linux ||
+      TargetPlatform.macOS ||
+      TargetPlatform.windows =>
+        DesktopDownloader(),
+      _ =>
+        throw ArgumentError('Platform $defaultTargetPlatform is not supported'),
+    };
     instance._storage = persistentStorage;
     instance.database = database;
     unawaited(instance.initialize());
@@ -536,6 +538,7 @@ abstract base class BaseDownloader {
     trackedGroups.add(group);
     if (markDownloadedComplete) {
       final records = await database.allRecords(group: group);
+      var startTime = DateTime.now();
       for (var record in records.where((record) =>
           record.task is DownloadTask &&
           (!Platform.isAndroid || record.task is! UriDownloadTask) &&
@@ -547,6 +550,10 @@ abstract base class BaseDownloader {
           final updatedRecord = record.copyWith(
               status: TaskStatus.complete, progress: progressComplete);
           await database.updateRecord(updatedRecord);
+        }
+        if (DateTime.now().difference(startTime).inMilliseconds > 10) {
+          await Future.delayed(const Duration(milliseconds: 50));
+          startTime = DateTime.now();
         }
       }
     }
@@ -924,7 +931,7 @@ abstract base class BaseDownloader {
   /// If the task is in final state, also removes the reference to the
   /// task-specific callbacks and completes the completer associated
   /// with this task
-  _awaitTaskStatusCallback(TaskStatusUpdate statusUpdate) {
+  void _awaitTaskStatusCallback(TaskStatusUpdate statusUpdate) {
     final task = statusUpdate.task;
     final status = statusUpdate.status;
     _shortTaskStatusCallbacks[task.taskId]?.call(status);
@@ -954,7 +961,7 @@ abstract base class BaseDownloader {
   /// Internal callback function that only passes progress updates on
   /// to the task-specific progress callback passed as parameter
   /// to the [enqueueAndAwait] call
-  _awaitTaskProgressCallBack(TaskProgressUpdate progressUpdate) {
+  void _awaitTaskProgressCallBack(TaskProgressUpdate progressUpdate) {
     _shortTaskProgressCallbacks[progressUpdate.task.taskId]
         ?.call(progressUpdate.progress);
     _taskProgressCallbacks[progressUpdate.task.taskId]?.call(progressUpdate);
