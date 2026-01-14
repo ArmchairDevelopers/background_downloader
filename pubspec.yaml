@@ -18,6 +18,7 @@ dependencies:
   async: ^2.6.0
   mime: ^2.0.0
   collection: ^1.15.0
+  rhttp: ^0.15.0
 
 dev_dependencies:
   flutter_test:

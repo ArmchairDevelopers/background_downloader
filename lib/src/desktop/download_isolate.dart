@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+import 'package:rhttp/rhttp.dart';
 
 import '../exceptions.dart';
 import '../models.dart';
@@ -24,6 +23,8 @@ late DownloadTask downloadTask; // global because filename may change
 /// the [messagesToIsolate] queue
 Future<void> doDownloadTask(DownloadTask task, ResumeData? resumeData,
     bool isResume, Duration requestTimeout, SendPort sendPort, [SendPort? customSendPort]) async {
+  await Rhttp.init();
+  DesktopDownloader.httpClient = RhttpCompatibleClient.createSync();
   // use downloadTask from here on as a 'global' variable in this isolate,
   // as we may change the filename of the task
   downloadTask = task;
