@@ -1494,8 +1494,50 @@ class CallbackTaskController {
   final void Function(TaskProgressUpdate update) _onProgress;
   final void Function(TaskStatusUpdate update) _onStatus;
 
+  DateTime _lastProgressEmit = DateTime.now();
+  int _lastBytes = 0;
+
   void updateProgress(double progress, {int expectedFileSize = -1}) {
     _onProgress(TaskProgressUpdate(_task, progress, expectedFileSize));
+  }
+
+  void updateBytesTransferred(
+    int bytesReceived,
+    int totalBytes, {
+    Duration interval = const Duration(seconds: 2),
+  }) {
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastProgressEmit);
+
+    if (elapsed < interval && bytesReceived < totalBytes) return;
+
+    final deltaBytes = bytesReceived - _lastBytes;
+    final speedBytesPerSec =
+        elapsed.inMilliseconds > 0
+            ? deltaBytes / (elapsed.inMilliseconds / 1000)
+            : 0.0;
+    final speedMBps = speedBytesPerSec / (1024 * 1024);
+
+    final remainingBytes = totalBytes - bytesReceived;
+    final timeRemaining =
+        speedBytesPerSec > 0
+            ? Duration(
+                seconds: (remainingBytes / speedBytesPerSec).ceil(),
+              )
+            : const Duration(seconds: -1);
+
+    final progress = totalBytes > 0 ? bytesReceived / totalBytes : 0.0;
+
+    _onProgress(TaskProgressUpdate(
+      _task,
+      progress,
+      totalBytes,
+      speedMBps,
+      timeRemaining,
+    ));
+
+    _lastProgressEmit = now;
+    _lastBytes = bytesReceived;
   }
 
   void complete() {
