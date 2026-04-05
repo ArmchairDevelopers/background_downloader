@@ -121,11 +121,13 @@ final class DesktopDownloader extends BaseDownloader {
 
   /// Execute this task
   ///
-  /// The task runs on an Isolate, which is sent the task information and
-  /// which will emit status and progress updates.  These updates will be
-  /// 'forwarded' to the [backgroundChannel] and processed by the
-  /// [FileDownloader]
+  /// For [CallbackTask], the callback runs on the main isolate.
+  /// For all other tasks, an Isolate is spawned to do the work.
   Future<void> _executeTask(Task task) async {
+    if (task is CallbackTask) {
+      return _executeCallbackTask(task);
+    }
+
     // Check if the file should be skipped
     if (task is DownloadTask && _skipExistingFiles != -1) {
       final filePath = await task.filePath();
@@ -660,6 +662,24 @@ final class DesktopDownloader extends BaseDownloader {
     _queue.clear();
     _running.clear();
     _isolateSendPorts.clear();
+  }
+
+  Future<void> _executeCallbackTask(CallbackTask task) async {
+    processStatusUpdate(TaskStatusUpdate(task, TaskStatus.running));
+    try {
+      final controller = CallbackTaskController(
+        task,
+        processProgressUpdate,
+        processStatusUpdate,
+      );
+      await task.execute(controller);
+    } catch (e) {
+      processStatusUpdate(TaskStatusUpdate(
+        task,
+        TaskStatus.failed,
+        TaskException(e.toString()),
+      ));
+    }
   }
 
   /// Remove all references to [task]

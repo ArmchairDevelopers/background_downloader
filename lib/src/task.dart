@@ -10,6 +10,7 @@ import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'exceptions.dart';
 import 'file_downloader.dart';
 import 'models.dart';
 import 'options/task_options.dart';
@@ -371,6 +372,8 @@ sealed class Task extends Request implements Comparable {
         'MultiUploadTask' => MultiUploadTask.fromJson(json),
         'ParallelDownloadTask' => ParallelDownloadTask.fromJson(json),
         'DataTask' => DataTask.fromJson(json),
+        'CallbackTask' => throw ArgumentError(
+            'CallbackTask cannot be deserialized from JSON'),
         _ => throw ArgumentError(
             'taskType not in [DownloadTask, UploadTask, MultiUploadTask, ParallelDownloadTask, DataTask]')
       };
@@ -1482,4 +1485,77 @@ final class DataTask extends Task {
 
   @override
   String get taskType => 'DataTask';
+}
+
+class CallbackTaskController {
+  CallbackTaskController(this._task, this._onProgress, this._onStatus);
+
+  final Task _task;
+  final void Function(TaskProgressUpdate update) _onProgress;
+  final void Function(TaskStatusUpdate update) _onStatus;
+
+  void updateProgress(double progress, {int expectedFileSize = -1}) {
+    _onProgress(TaskProgressUpdate(_task, progress, expectedFileSize));
+  }
+
+  void complete() {
+    _onStatus(TaskStatusUpdate(_task, TaskStatus.complete));
+  }
+
+  void fail([String? message]) {
+    _onStatus(TaskStatusUpdate(
+      _task,
+      TaskStatus.failed,
+      message != null ? TaskException(message) : null,
+    ));
+  }
+}
+
+final class CallbackTask extends Task {
+  CallbackTask({
+    required this.execute,
+    super.taskId,
+    super.group,
+    super.updates = Updates.statusAndProgress,
+    super.priority,
+    super.displayName,
+    super.metaData,
+  }) : super(url: '', filename: 'callback_task');
+
+  final Future<void> Function(CallbackTaskController controller) execute;
+
+  @override
+  String get taskType => 'CallbackTask';
+
+  @override
+  CallbackTask copyWith({
+    String? taskId,
+    String? url,
+    String? filename,
+    Map<String, String>? headers,
+    String? httpRequestMethod,
+    Object? post,
+    String? directory,
+    BaseDirectory? baseDirectory,
+    String? group,
+    Updates? updates,
+    bool? requiresWiFi,
+    int? retries,
+    int? retriesRemaining,
+    bool? allowPause,
+    int? priority,
+    String? metaData,
+    String? displayName,
+    DateTime? creationTime,
+    TaskOptions? options,
+  }) =>
+      CallbackTask(
+        execute: execute,
+        taskId: taskId ?? this.taskId,
+        group: group ?? this.group,
+        updates: updates ?? this.updates,
+        priority: priority ?? this.priority,
+        displayName: displayName ?? this.displayName,
+        metaData: metaData ?? this.metaData,
+      )..retriesRemaining = retriesRemaining ?? this.retriesRemaining;
 }

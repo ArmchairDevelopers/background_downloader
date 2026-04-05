@@ -988,6 +988,7 @@ abstract base class BaseDownloader {
       double? progress,
       int expectedFileSize,
       TaskException? taskException) async {
+    if (task is CallbackTask) return;
     if (trackedGroups.contains(null) || trackedGroups.contains(task.group)) {
       if (status == null && progress != null) {
         // update existing record with progress only (provided it's not 'paused')
