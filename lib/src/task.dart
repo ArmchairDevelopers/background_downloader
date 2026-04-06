@@ -1487,12 +1487,31 @@ final class DataTask extends Task {
   String get taskType => 'DataTask';
 }
 
+class CancelledException implements Exception {
+  const CancelledException();
+
+  @override
+  String toString() => 'CancelledException';
+}
+
 class CallbackTaskController {
   CallbackTaskController(this._task, this._onProgress, this._onStatus);
 
   final Task _task;
   final void Function(TaskProgressUpdate update) _onProgress;
   final void Function(TaskStatusUpdate update) _onStatus;
+
+  bool _isCancelled = false;
+
+  bool get isCancelled => _isCancelled;
+
+  void cancel() {
+    _isCancelled = true;
+  }
+
+  void throwIfCancelled() {
+    if (_isCancelled) throw const CancelledException();
+  }
 
   DateTime _lastProgressEmit = DateTime.now();
   int _lastBytes = 0;

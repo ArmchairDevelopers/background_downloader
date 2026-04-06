@@ -41,6 +41,7 @@ final class DesktopDownloader extends BaseDownloader {
   final _resume = <Task>{};
   final _isolateSendPorts =
       <Task, SendPort?>{}; // isolate SendPort for running task
+  final _callbackControllers = <String, CallbackTaskController>{};
   static var httpClient = http.Client();
   static Duration? _requestTimeout;
   static var _proxy = <String, dynamic>{}; // 'address' and 'port'
@@ -351,6 +352,10 @@ final class DesktopDownloader extends BaseDownloader {
     }
     final running = _running.where((task) => taskIds.contains(task.taskId));
     for (final task in running) {
+      if (task is CallbackTask) {
+        _callbackControllers[task.taskId]?.cancel();
+        continue;
+      }
       final sendPort = _isolateSendPorts[task];
       if (sendPort != null) {
         sendPort.send('cancel');
@@ -662,23 +667,29 @@ final class DesktopDownloader extends BaseDownloader {
     _queue.clear();
     _running.clear();
     _isolateSendPorts.clear();
+    _callbackControllers.clear();
   }
 
   Future<void> _executeCallbackTask(CallbackTask task) async {
     processStatusUpdate(TaskStatusUpdate(task, TaskStatus.running));
+    final controller = CallbackTaskController(
+      task,
+      processProgressUpdate,
+      processStatusUpdate,
+    );
+    _callbackControllers[task.taskId] = controller;
     try {
-      final controller = CallbackTaskController(
-        task,
-        processProgressUpdate,
-        processStatusUpdate,
-      );
       await task.execute(controller);
+    } on CancelledException {
+      processStatusUpdate(TaskStatusUpdate(task, TaskStatus.canceled));
     } catch (e) {
       processStatusUpdate(TaskStatusUpdate(
         task,
         TaskStatus.failed,
         TaskException(e.toString()),
       ));
+    } finally {
+      _callbackControllers.remove(task.taskId);
     }
   }
 
